@@ -1,4 +1,4 @@
-from langchain_groq.chat_models import ChatGroq
+from langchain_openrouter import ChatOpenRouter
 from typing import List, TypedDict
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
@@ -16,8 +16,8 @@ class Tool_state(TypedDict):
     messages : List
 
 
-llm = ChatGroq(
-    model="openai/gpt-oss-120b",
+llm = ChatOpenRouter(
+    model="stepfun/step-3.5-flash:free",
     temperature=0,
     max_retries=3
 )
@@ -47,7 +47,7 @@ Example : {"commands": ["echo 'Hello World!'"]}
             results.append("Error: Command timed out after 30 seconds")
         except Exception as e:
             results.append(f"Error: {str(e)}")
-    print(results)
+    # print(results)
     return "\n".join(results)
     
 checkpointer = InMemorySaver()
@@ -67,32 +67,41 @@ def llm_node(state : Tool_state) -> Tool_state:
     prompt = ChatPromptTemplate.from_messages(
         [
             (
-                "system",
+                "system",n
                 """### SYSTEM ROLE
-You are a Linux Automation Agent with a self-correction loop. Your goal is to fulfill user requests by executing real shell commands. Your working directory is `/home/pdp28`, dont wait for any instructions from user other than sudo password.
+You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your mission is to efficiently fulfill user requests by executing appropriate shell commands. Your primary working directory is `/home/pdp28`.
 
-### OPERATIONAL RULES
-1. **Case-Insensitive Discovery**:
-   - If a user mentions a path that doesn't exist, DO NOT fail.
-   - Run `ls -F | grep -i "name"` or `find . -maxdepth 2 -iname "*name*"` to locate the correct directory.
-   - Automatically `cd` into the matched path and continue the task.
+### CORE PRINCIPLES
+1. **Proactive Path Resolution**:
+   - When users mention paths or files that may not exist, automatically search for them using intelligent discovery.
+   - Use `find . -iname "*keyword*" -type f 2>/dev/null | head -20` to locate resources.
+   - Never assume paths; verify and correct them before proceeding.
 
-2. **Self-Correction Loop (CRITICAL)**:
-   - If a command returns an error (stderr) or an unexpected empty result, analyze the output.
-   - Formulate a hypothesis on why it failed (e.g., "Permission denied", "Wrong path", "Syntax error").
-   - Execute a corrected command immediately. Do not ask for permission to try a fix unless you have failed 3 times in a row.
+2. **Intelligent Self-Correction (MANDATORY)**:
+   - Always analyze command output for errors, warnings, or unexpected results.
+   - Diagnose failure root causes (permissions, missing files, syntax errors, environment issues).
+   - Immediately execute corrected commands without requesting user approval.
+   - Maximum 3 retry attempts per task; then report the issue clearly.
 
-3. **Validation**:
-   - After creating a file or moving a directory, always run `ls` or `cat` to verify the action was successful before reporting to the user.
+3. **Comprehensive Verification**:
+   - Validate every critical action (file creation, directory operations, config changes).
+   - Use verification commands: `ls -la`, `cat`, `stat`, `file` to confirm success.
+   - Report verification results to ensure transparency.
 
-4. **Safety & Formatting**:
-   - Use absolute paths when possible.
-   - If a command requires `sudo`, explain why briefly in the final response.
-   - Provide the final output in a clean summary; do not dump raw logs unless requested.
-   - when you think the process is completed dont give the tool_calls leave it as tool_calls as empty
+4. **Communication & Safety**:
+   - Use absolute paths exclusively to prevent ambiguity.
+   - Clearly explain any `sudo` requirements and security implications.
+   - Provide concise, structured output summaries with no unnecessary verbose logs.
+   - Do not include `tool_calls` in the final response when the task is complete.
 
-### EXECUTION FLOW
-- Receive Goal -> Search/Navigate -> Execute -> Verify -> (If Error: Fix & Repeat) -> Final Answer."""
+5. **Error Handling**:
+   - Timeout errors: Increase timeout or reduce command scope.
+   - Permission errors: Check file ownership, group membership, or sudo requirements.
+   - Missing dependencies: Install them or suggest alternatives.
+   - Environment errors: Verify PATH, environment variables, and active virtual environments.
+
+### EXECUTION STRATEGY
+User Request → Path Validation → Command Execution → Output Analysis → Verification → (Errors? Self-Correct Loop) → Final Clean Summary"""
             ),
             ("placeholder", "{input}")
         ]
@@ -100,9 +109,10 @@ You are a Linux Automation Agent with a self-correction loop. Your goal is to fu
 
     chain = prompt | llm_with_tools
     response = chain.invoke({"input":messages})
-
-    state["messages"].append(response)
-    return state
+    # print(response)
+    state["messages"].append(AIMessage(content=response.content, tool_calls=response.tool_calls, invalid_tool_calls=response.invalid_tool_calls ))
+    # print(state)
+    return {"messages" : state["messages"]}
 
 def if_tool_call(state : Tool_state) -> str:
     messages = state["messages"][-1]
@@ -123,7 +133,7 @@ def tool_node(state : Tool_state) -> Tool_state:
             tool_name = tool_call["name"]
             response = tool_by_name.get(tool_name).invoke(tool_call["args"])
             state["messages"].append(ToolMessage(content=str(response), tool_call_id=tool_call["id"]))
-    return state
+        return {"messages" : state["messages"]}
     
 state_graph = StateGraph(Tool_state)
 
@@ -153,17 +163,25 @@ def main():
 
     messages.append(HumanMessage(content=user_input))
 
-    res = graph.invoke({
-        "messages": messages
-    }, config)
+    # res = graph.invoke({
+    #     "messages": messages
+    # }, config)
+    for chunk in graph.stream(
+    {
+        "messages": messages,
+    },
+    stream_mode=["updates"],
+    config=config
+):
+        print(chunk)
 
-    messages = res["messages"]
+    # messages = res["messages"]
 
-    print("\n✅ Agent Response:")
-    print("-"*60)
-    for msg in res["messages"]:
-        if hasattr(msg, 'content') and msg.content:
-            print(msg.content)
+    # print("\n✅ Agent Response:")
+    # print("-"*60)
+    # for msg in res["messages"]:
+    #     if hasattr(msg, 'content') and msg.content:
+    #         print(msg.content)
     
     
 if __name__ == "__main__":

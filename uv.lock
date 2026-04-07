@@ -1115,6 +1115,19 @@ wheels = [
 ]
 
 [[package]]
+name = "langchain-openrouter"
+version = "0.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "langchain-core" },
+    { name = "openrouter" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/3a/e8/adeec96cbc45d1715e5a92a19590ec17059616aac16d0d04177e8e39e6e5/langchain_openrouter-0.2.1.tar.gz", hash = "sha256:da4dd6a6e0b36ba0d82dd999bbcee2676f20daf1130b74186f76acc670c270f2", size = 158575, upload-time = "2026-03-30T00:53:54.215Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/17/d1/8db4b0d8abd0c8c361af499c399cc9ae5b73ad7f50865e68dec306c9ac03/langchain_openrouter-0.2.1-py3-none-any.whl", hash = "sha256:37d7c213bc9a1d34a5d4922b3231d7055662e74736c0d648ef68f2594c9e4fc3", size = 21260, upload-time = "2026-03-30T00:53:53.149Z" },
+]
+
+[[package]]
 name = "langchain-text-splitters"
 version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1167,6 +1180,7 @@ dependencies = [
     { name = "langchain-core" },
     { name = "langchain-experimental" },
     { name = "langchain-groq" },
+    { name = "langchain-openrouter" },
     { name = "langgraph" },
     { name = "python-dotenv" },
 ]
@@ -1179,6 +1193,7 @@ requires-dist = [
     { name = "langchain-core", specifier = ">=1.2.25" },
     { name = "langchain-experimental", specifier = ">=0.4.1" },
     { name = "langchain-groq", specifier = ">=1.1.2" },
+    { name = "langchain-openrouter", specifier = ">=0.2.1" },
     { name = "langgraph", specifier = ">=1.1.5" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
 ]
@@ -1577,6 +1592,20 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ed/ad/483d9e262f4b831000062e5d8a45e342166ec8aaa1195264982bca267e62/numpy-2.4.4-cp314-cp314t-win32.whl", hash = "sha256:dddbbd259598d7240b18c9d87c56a9d2fb3b02fe266f49a7c101532e78c1d871", size = 6155500, upload-time = "2026-03-29T13:21:28.205Z" },
     { url = "https://files.pythonhosted.org/packages/c7/03/2fc4e14c7bd4ff2964b74ba90ecb8552540b6315f201df70f137faa5c589/numpy-2.4.4-cp314-cp314t-win_amd64.whl", hash = "sha256:a7164afb23be6e37ad90b2f10426149fd75aee07ca55653d2aa41e66c4ef697e", size = 12637755, upload-time = "2026-03-29T13:21:31.107Z" },
     { url = "https://files.pythonhosted.org/packages/58/78/548fb8e07b1a341746bfbecb32f2c268470f45fa028aacdbd10d9bc73aab/numpy-2.4.4-cp314-cp314t-win_arm64.whl", hash = "sha256:ba203255017337d39f89bdd58417f03c4426f12beed0440cfd933cb15f8669c7", size = 10566643, upload-time = "2026-03-29T13:21:34.339Z" },
+]
+
+[[package]]
+name = "openrouter"
+version = "0.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpcore" },
+    { name = "httpx" },
+    { name = "pydantic" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/39/52/4f9fdb605c8d4ecc106a55bb034f09f8f4270bd11b0e7ad3f05f2d52a8e3/openrouter-0.8.1.tar.gz", hash = "sha256:d272f743a58ed34827d531f48e3745f5eea0dd11ab0d4022e49106286f6f358a", size = 163740, upload-time = "2026-04-02T14:23:41.457Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/96/d168d2a28dc1be4e33e05d1656ceb9466f844211e6ffbba389804fbb5a84/openrouter-0.8.1-py3-none-any.whl", hash = "sha256:b8ec0711eb2971560cf8a5a6fbd5c52e3d704c58ab310f72ecf05ba567534513", size = 337196, upload-time = "2026-04-02T14:23:40.263Z" },
 ]
 
 [[package]]
