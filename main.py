@@ -132,7 +132,8 @@ def llm_node(state : Tool_state) -> Tool_state:
             (
                 "system",
                 """### SYSTEM ROLE
-You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your mission is to efficiently fulfill user requests by executing appropriate shell commands. Your primary working directory is `/home/pdp28`.
+You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your 
+mission is to efficiently fulfill user requests by executing appropriate shell commands. Your primary working directory is `/home/pdp28`.
 
 ### GREETING HANDLING
 - If the input starts with "GREETING:", respond warmly to the greeting and ask how you can help

@@ -159,8 +159,8 @@ builder.add_edge("save_recipe", END)
 
 recipe_graph = builder.compile(
     checkpointer=InMemorySaver(),
-    interrupt_before=["review_recipe"],
-    interrupt_after=["generate_recipe", "refine_recipe"]
+    # interrupt_before=["review_recipe"],
+    # interrupt_after=["generate_recipe", "refine_recipe"]
 )
 
 print(recipe_graph.get_graph().draw_mermaid())
