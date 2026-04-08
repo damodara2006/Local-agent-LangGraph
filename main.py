@@ -1,41 +1,49 @@
 from langchain_openrouter import ChatOpenRouter
-from typing import List, TypedDict, Literal, Optional
+from langchain_groq import ChatGroq
+from typing import List, TypedDict, Optional, Literal
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
-from langgraph.types import Command, interrupt
 from langchain_community.tools import ShellTool
 from IPython.display import Image
 import subprocess
 from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import interrupt
 load_dotenv()
 
 class Tool_state(TypedDict):
-    messages : List
-    pending_command: Optional[str]
+    messages: List
+    pending_commands: Optional[List[str]]
     approval_status: Optional[Literal["pending", "approved", "rejected"]]
 
 
-llm = ChatOpenRouter(
-    model="stepfun/step-3.5-flash:free",
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
     temperature=0,
     max_retries=3
 )
 
+
 # @tool
 def refactor_tool(state : Tool_state) :
     """
-    This is a helpful tool for the LLM it will refactor the input that human
+    This is a helpful tool for the LLM, you need to refactor the input that the user asked for, in linux
+    Example :
+    user : list the folders
+    your response : the user is asking to list the folders in the current directory including the hidden ones
     """
     print(state["messages"][0].content)
     state_msg = state["messages"][0].content
-    
-    print(" ⏳ Refactoring the input")
-    
+
+    print("⏳Refactoring the input")
+
     promt = ChatPromptTemplate.from_messages([
-        ("system", """You are a message refactoring agent. Your task is to:
+        ("system", """You are a message refactoring agent for linux. Your task is to:
+         Example :
+    user : list the folders
+    your response : the user is asking to list the folders in the current directory including the hidden ones
 1. Detect greetings (hello, hi, hey, good morning, etc.) and pass them through as-is with a greeting flag
 2. For non-greeting messages, clarify and enhance the user's request for downstream LLM processing
 3. Identify the core intent and requirements
@@ -43,9 +51,9 @@ def refactor_tool(state : Tool_state) :
 5. Format: If greeting, output "GREETING: [greeting]". Otherwise output the clarified request."""),
         ("human", "{input}")
     ])
-    
+
     chain = promt | llm
-    
+
     response = chain.invoke({
         "input" : state_msg
     })
@@ -55,58 +63,6 @@ def refactor_tool(state : Tool_state) :
 
     return {"messages": refactored_messages}
 
-def approval_node(state: Tool_state) -> Tool_state:
-    """Node that asks for command approval using interrupt"""
-    pending_cmd = state.get("pending_command", "")
-
-    print("\n🔍 Command to execute:")
-    print(f"   {pending_cmd}")
-
-    # Use interrupt to pause execution and ask for approval
-    decision = interrupt({
-        "question": "Approve this command?",
-        "command": pending_cmd,
-    })
-
-    # Set approval status and return state for conditional routing
-    state["approval_status"] = "approved" if decision else "rejected"
-    return state
-
-
-def execute_command_node(state: Tool_state) -> Tool_state:
-    """Execute the approved command"""
-    cmd = state.get("pending_command", "")
-
-    try:
-        print("⏳ Executing command...")
-        output = subprocess.run(
-            cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            cwd="/home/pdp28/",
-            input="y\n",
-            timeout=30
-        )
-        result = output.stdout + output.stderr
-        state["approval_status"] = "approved"
-    except subprocess.TimeoutExpired:
-        result = "Error: Command timed out after 30 seconds"
-        state["approval_status"] = "approved"
-    except Exception as e:
-        result = f"Error: {str(e)}"
-        state["approval_status"] = "approved"
-
-    return {"approval_status": state["approval_status"], "messages": state["messages"]}
-
-
-def skip_command_node(state: Tool_state) -> Tool_state:
-    """Skip execution if command denied"""
-    state["approval_status"] = "rejected"
-    print("❌ Command execution denied by user")
-    return {"approval_status": state["approval_status"], "messages": state["messages"]}
-
-
 @tool
 def shell_tool(commands: List[str]) -> str:
     """Use this tool to execute shell commands on the local machine.
@@ -114,15 +70,52 @@ Only run safe and necessary commands.
 Return the command output exactly as produced by the shell.
 Example : {"commands": ["echo 'Hello World!'"]}
 """
-    # This is kept as a placeholder for now
-    # Commands will be handled by the approval workflow
-    return "Command execution handled by approval workflow"
+    results = []
+    for cmd in commands:
+        try:
+            output = subprocess.run(
+                cmd,
+                shell=True,
+                capture_output=True,
+                text=True,
+                cwd="/home/pdp28/",
+                input="y\n",
+                timeout=30
+            )
+            print(f"Executing : {cmd}")
+            results.append(output.stdout + output.stderr)
 
+        except subprocess.TimeoutExpired:
+            results.append("Error: Command timed out after 30 seconds")
+        except Exception as e:
+            results.append(f"Error: {str(e)}")
+    # print(results)
+    return "\n".join(results)
 
-    
+@tool
+def list_directory(path: str = "/home/pdp28") -> str:
+    """List folders and files in a given directory path.
+Use this when the user asks to list folders, files, or directory contents.
+Defaults to the home directory if no path is specified.
+Example: {"path": "/home/pdp28"}
+"""
+    try:
+        output = subprocess.run(
+            f"ls -lA --group-directories-first '{path}'",
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        return output.stdout + output.stderr
+    except subprocess.TimeoutExpired:
+        return "Error: Command timed out"
+    except Exception as e:
+        return f"Error: {str(e)}"
+
 checkpointer = InMemorySaver()
 
-llm_with_tools = llm.bind_tools([shell_tool])
+llm_with_tools = llm.bind_tools([shell_tool, list_directory])
 
 def llm_node(state : Tool_state) -> Tool_state:
     messages = state["messages"]
@@ -184,7 +177,7 @@ User Request → Path Validation → Command Execution → Output Analysis → V
 
     chain = prompt | llm_with_tools
     response = chain.invoke({"input":messages})
-    print(response)
+    # print(response)
     state["messages"].append(AIMessage(content=response.content, tool_calls=response.tool_calls, invalid_tool_calls=response.invalid_tool_calls ))
     # print(state)
     return {"messages" : state["messages"]}
@@ -195,53 +188,126 @@ def if_tool_call(state : Tool_state) -> str:
     messages = state["messages"][-1]
 
     if messages.tool_calls:
-        return "tool_node"
+        return "approval"
     else:
         return "end"
 
 def tool_node(state : Tool_state) -> Tool_state:
+    """Extract tool calls and prepare them for approval"""
     messages = state["messages"][-1]
 
-    tool_by_name = {t.name : t for t in [shell_tool]}
+    tool_by_name = {t.name : t for t in [shell_tool, list_directory]}
+    if messages.tool_calls:
+        # Store all pending tool calls for approval
+        pending_cmds = []
+        for tool_call in messages.tool_calls:
+            tool_name = tool_call["name"]
+            args = tool_call["args"]
+
+            if tool_name == "shell_tool":
+                commands = args.get("commands", [])
+                pending_cmds.extend(commands)
+            elif tool_name == "list_directory":
+                path = args.get("path", "/home/pdp28")
+                pending_cmds.append(f"list_directory(path='{path}')")
+
+        if pending_cmds:
+            state["pending_commands"] = pending_cmds
+            state["approval_status"] = "pending"
+            return {
+                "messages": state["messages"],
+                "pending_commands": pending_cmds,
+                "approval_status": "pending"
+            }
+
+    return {"messages": state["messages"]}
+
+def approval_node(state: Tool_state):
+    """Ask user to approve pending commands before execution"""
+    if not state.get("pending_commands"):
+        return {"approval_status": "no_pending"}
+
+    commands_str = "\n".join(f"  • {cmd}" for cmd in state["pending_commands"])
+
+    # Use interrupt to pause and wait for user input
+    decision = interrupt({
+        "question": "Do you approve executing these commands?",
+        "details": f"Pending commands:\n{commands_str}",
+    })
+
+    # Return the decision (will be resumed with the user's answer)
+    if decision:
+        return {"approval_status": "approved"}
+    else:
+        return {"approval_status": "rejected"}
+
+def execute_commands(state: Tool_state) -> Tool_state:
+    """Execute the approved tool calls"""
+    messages = state["messages"][-1]
+    tool_by_name = {t.name : t for t in [shell_tool, list_directory]}
+
     if messages.tool_calls:
         for tool_call in messages.tool_calls:
-            # print(tool_by_name.get(tool_call["name"]))
-
             tool_name = tool_call["name"]
             response = tool_by_name.get(tool_name).invoke(tool_call["args"])
             state["messages"].append(ToolMessage(content=str(response), tool_call_id=tool_call["id"]))
-        return {"messages" : state["messages"]}
-    
+
+    return {
+        "messages": state["messages"],
+        "approval_status": "approved",
+        "pending_commands": None
+    }
+
+def should_execute(state: Tool_state) -> str:
+    """Decide whether to execute or cancel based on approval"""
+    if state.get("approval_status") == "approved":
+        return "execute_commands"
+    elif state.get("approval_status") == "rejected":
+        return "cancel_execution"
+    else:
+        return "llm_node"
+
+def cancel_execution(state: Tool_state) -> Tool_state:
+    """Cancel command execution"""
+    print("❌ Command execution cancelled by user")
+    return {
+        "approval_status": "rejected",
+        "pending_commands": None,
+        "messages": state["messages"]
+    }
+
+
 state_graph = StateGraph(Tool_state)
 
 state_graph.add_node("llm_node", llm_node)
 state_graph.add_node("tool_node", tool_node)
 state_graph.add_node("refactor_tool", refactor_tool)
-state_graph.add_node("approval_node", approval_node)
-state_graph.add_node("execute_command_node", execute_command_node)
-state_graph.add_node("skip_command_node", skip_command_node)
+state_graph.add_node("approval", approval_node)
+state_graph.add_node("execute_commands", execute_commands)
+state_graph.add_node("cancel_execution", cancel_execution)
 
 state_graph.add_edge(START, "refactor_tool")
 state_graph.add_edge("refactor_tool", "llm_node")
-state_graph.add_conditional_edges("llm_node", if_tool_call, {"tool_node": "tool_node", "end": END})
-state_graph.add_edge("tool_node", "approval_node")
-state_graph.add_conditional_edges(
-    "approval_node",
-    lambda x: x.get("approval_status", "rejected"),
-    {"approved": "execute_command_node", "rejected": "skip_command_node"}
-)
-state_graph.add_edge("execute_command_node", "llm_node")
-state_graph.add_edge("skip_command_node", "llm_node")
+state_graph.add_conditional_edges("llm_node", if_tool_call, {"approval": "tool_node", "end": END})
+state_graph.add_edge("tool_node", "approval")
+state_graph.add_conditional_edges("approval", should_execute, {
+    "execute_commands": "execute_commands",
+    "cancel_execution": "cancel_execution",
+    "llm_node": "llm_node"
+})
+state_graph.add_edge("execute_commands", "llm_node")
+state_graph.add_edge("cancel_execution", END)
 
-graph = state_graph.compile(checkpointer=checkpointer)
+graph = state_graph.compile(
+    checkpointer=checkpointer,
+    interrupt_after=["approval"]  # Interrupt after approval node
+)
 
 
 
 def main():
     running = True
     config = {"configurable": {"thread_id": "1"}}
-
-    print("📝 Agent started. Type 'no' to exit\n")
 
     while running:
         print("\n" + "="*60)
@@ -253,41 +319,56 @@ def main():
         if not user_input:
             continue
 
-        # Invoke the graph
-        input_state = {
+        # Initialize state with all required fields
+        initial_state = {
             "messages": [HumanMessage(content=user_input)],
-            "pending_command": None,
+            "pending_commands": None,
             "approval_status": None
         }
 
-        # Handle graph execution with potential interrupts
-        while True:
-            res = graph.invoke(input_state, config)
+        try:
+            # Invoke the graph with initial state
+            graph.invoke(initial_state, config)
 
-            # Check if there's an interrupt (approval needed)
-            if "__interrupt__" in res and res["__interrupt__"]:
-                interrupt_info = res["__interrupt__"][0].value
-                print(f"\n❓ {interrupt_info['question']}")
-                print(f"   Command: {interrupt_info['command']}")
+            # Check for interrupts in a loop
+            while True:
+                state = graph.get_state(config)
 
-                approval = input("👤 Approve? (yes/no): ").strip().lower()
-                decision = approval in ["yes", "y"]
+                # If there's no next node or we've finished, break
+                if not state.next:
+                    break
 
-                # Resume with decision
-                res = graph.invoke(Command(resume=decision), config)
+                # Check if we're at the approval node with pending commands
+                if state.values.get("pending_commands"):
+                    print("\n⚠️  APPROVAL REQUIRED:")
+                    print("-"*60)
+                    for cmd in state.values["pending_commands"]:
+                        print(f"  • {cmd}")
 
-            # No more interrupts
-            if "__interrupt__" not in res or not res["__interrupt__"]:
-                break
+                    approval = input("\nApprove execution? (yes/no): ").strip().lower()
+                    decision = approval == "yes"
 
-        print("\n✅ Agent Response:")
-        print("-"*60)
-        # Only print the final AIMessage (last message with content and no pending tool calls)
-        for msg in reversed(res["messages"]):
-            if isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
-                print(msg.content)
-                break
-    
-    
+                    # Resume the graph with updated approval status
+                    state.values["approval_status"] = "approved" if decision else "rejected"
+                    graph.invoke(state.values, config)
+                else:
+                    # No pending commands, continue execution
+                    graph.invoke(None, config)
+
+            # Get final state and display response
+            final_state = graph.get_state(config)
+            print("\n✅ Agent Response:")
+            print("-"*60)
+            for msg in reversed(final_state.values["messages"]):
+                if isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
+                    print(msg.content)
+                    break
+
+        except Exception as e:
+            import traceback
+            print(f"Error: {str(e)}")
+            traceback.print_exc()
+
+
 if __name__ == "__main__":
     main()
