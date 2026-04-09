@@ -1,6 +1,7 @@
 from langchain_openrouter import ChatOpenRouter
 from langchain_groq import ChatGroq
-from typing import List, TypedDict
+from typing import List, TypedDict, Literal
+from langgraph.types import interrupt, Command
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
@@ -10,18 +11,22 @@ from langchain_community.tools import ShellTool
 from IPython.display import Image
 import subprocess
 from typing import List
-from langgraph.checkpoint.memory import InMemorySaver  
+from langgraph.checkpoint.memory import InMemorySaver
 load_dotenv()
 
 class Tool_state(TypedDict):
     messages : List
-
+    allow : bool
 
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
     temperature=0,
     max_retries=3
 )
+
+# def human_in_loop(state : StateGraph):
+    
+# def get_allow_state(config : )
 
 @tool
 def shell_tool(commands: List[str]) -> str:
@@ -43,7 +48,6 @@ Example : {"commands": ["echo 'Hello World!'"]}
                 timeout=30
             )
             results.append(output.stdout + output.stderr)
-
         except subprocess.TimeoutExpired:
             results.append("Error: Command timed out after 30 seconds")
         except Exception as e:
@@ -57,6 +61,7 @@ llm_with_tools = llm.bind_tools([shell_tool])
 
 def llm_node(state : Tool_state) -> Tool_state:
     messages = state["messages"]
+    allow = state.get("allow", False)
 
     # Keep only the last N messages to avoid token limits
     # Keep the initial user message + last 10 messages to maintain context
@@ -113,7 +118,7 @@ User Request → Path Validation → Command Execution → Output Analysis → V
     # print(response)
     state["messages"].append(AIMessage(content=response.content, tool_calls=response.tool_calls, invalid_tool_calls=response.invalid_tool_calls ))
     # print(state)
-    return {"messages" : state["messages"]}
+    return {"messages" : state["messages"], "allow": allow}
 
 def if_tool_call(state : Tool_state) -> str:
     messages = state["messages"][-1]
@@ -125,6 +130,7 @@ def if_tool_call(state : Tool_state) -> str:
 
 def tool_node(state : Tool_state) -> Tool_state:
     messages = state["messages"][-1]
+    allow = state.get("allow", False)
 
     tool_by_name = {t.name : t for t in [shell_tool]}
     if messages.tool_calls:
@@ -132,9 +138,26 @@ def tool_node(state : Tool_state) -> Tool_state:
             # print(tool_by_name.get(tool_call["name"]))
 
             tool_name = tool_call["name"]
+
+            if tool_name == "shell_tool" and not allow:
+                cmd_list = tool_call["args"].get("commands", [])
+                cmd_preview = cmd_list[0] if cmd_list else "the requested command(s)"
+                approval = interrupt({
+                    "question": "Are you okay to run ",
+                    "query": cmd_preview,
+                })
+
+                if str(approval).strip().lower() not in {"y", "yes"}:
+                    state["messages"].append(
+                        ToolMessage(content=f"Skipped by user: {cmd_preview}", tool_call_id=tool_call["id"])
+                    )
+                    continue
+
+                allow = True
+
             response = tool_by_name.get(tool_name).invoke(tool_call["args"])
             state["messages"].append(ToolMessage(content=str(response), tool_call_id=tool_call["id"]))
-        return {"messages" : state["messages"]}
+        return {"messages" : state["messages"], "allow" : allow}
     
 state_graph = StateGraph(Tool_state)
 
@@ -164,25 +187,44 @@ def main():
 
     messages.append(HumanMessage(content=user_input))
 
-    # res = graph.invoke({
-    #     "messages": messages
-    # }, config)
-    for chunk in graph.stream(
-    {
+    res = graph.invoke({
         "messages": messages,
-    },
-    stream_mode=["updates"],
-    config=config
-):
-        print(chunk)
+         "allow":False
+    }, config)
+    
+    while True:
+        snapshot = graph.get_state(config)
+        # print(snapshot)
+        if snapshot.tasks and snapshot.tasks[0].interrupts:
+            interrupt_value = snapshot.tasks[0].interrupts[0].value
+            # print("\n⏸️ Interrupt data:")
+            # print(interrupt_value)
+            print(interrupt_value["question"] + interrupt_value["query"]  + "(y/n) : ", end="")
+            input_human = input()
 
+            res = graph.invoke(Command(resume=input_human), config=config)
+            # print(f"{interrupt_value["query"]}")
+            # print(res)
+            if input_human.lower() == "n":
+                print("Rejected by user")
+                return
+            for msg in res["messages"]:
+                if hasattr(msg, 'content') and msg.content:
+                    print(msg.content)
+        else :
+            print("="*100)
+            print("Work done !")
+            return
+
+    else:
+        print("\nNo interrupt data found.")
+
+    return
     # messages = res["messages"]
 
     # print("\n✅ Agent Response:")
     # print("-"*60)
-    # for msg in res["messages"]:
-    #     if hasattr(msg, 'content') and msg.content:
-    #         print(msg.content)
+    
     
     
 if __name__ == "__main__":
