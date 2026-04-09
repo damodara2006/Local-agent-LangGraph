@@ -1,6 +1,6 @@
 from langchain_openrouter import ChatOpenRouter
 from langchain_groq import ChatGroq
-from typing import List, TypedDict, Optional, Literal
+from typing import List, TypedDict
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
@@ -9,14 +9,12 @@ from langgraph.graph import StateGraph, START, END
 from langchain_community.tools import ShellTool
 from IPython.display import Image
 import subprocess
-from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.types import interrupt
+from typing import List
+from langgraph.checkpoint.memory import InMemorySaver  
 load_dotenv()
 
 class Tool_state(TypedDict):
-    messages: List
-    pending_commands: Optional[List[str]]
-    approval_status: Optional[Literal["pending", "approved", "rejected"]]
+    messages : List
 
 
 llm = ChatGroq(
@@ -24,44 +22,6 @@ llm = ChatGroq(
     temperature=0,
     max_retries=3
 )
-
-
-# @tool
-def refactor_tool(state : Tool_state) :
-    """
-    This is a helpful tool for the LLM, you need to refactor the input that the user asked for, in linux
-    Example :
-    user : list the folders
-    your response : the user is asking to list the folders in the current directory including the hidden ones
-    """
-    print(state["messages"][0].content)
-    state_msg = state["messages"][0].content
-
-    print("⏳Refactoring the input")
-
-    promt = ChatPromptTemplate.from_messages([
-        ("system", """You are a message refactoring agent for linux. Your task is to:
-         Example :
-    user : list the folders
-    your response : the user is asking to list the folders in the current directory including the hidden ones
-1. Detect greetings (hello, hi, hey, good morning, etc.) and pass them through as-is with a greeting flag
-2. For non-greeting messages, clarify and enhance the user's request for downstream LLM processing
-3. Identify the core intent and requirements
-4. Be concise and structured in your response
-5. Format: If greeting, output "GREETING: [greeting]". Otherwise output the clarified request."""),
-        ("human", "{input}")
-    ])
-
-    chain = promt | llm
-
-    response = chain.invoke({
-        "input" : state_msg
-    })
-    print("Refactored:", response.content)
-    # Replace the last message with a new HumanMessage containing the refactored text
-    refactored_messages = state["messages"][:-1] + [HumanMessage(content=response.content)]
-
-    return {"messages": refactored_messages}
 
 @tool
 def shell_tool(commands: List[str]) -> str:
@@ -82,7 +42,6 @@ Example : {"commands": ["echo 'Hello World!'"]}
                 input="y\n",
                 timeout=30
             )
-            print(f"Executing : {cmd}")
             results.append(output.stdout + output.stderr)
 
         except subprocess.TimeoutExpired:
@@ -91,31 +50,10 @@ Example : {"commands": ["echo 'Hello World!'"]}
             results.append(f"Error: {str(e)}")
     # print(results)
     return "\n".join(results)
-
-@tool
-def list_directory(path: str = "/home/pdp28") -> str:
-    """List folders and files in a given directory path.
-Use this when the user asks to list folders, files, or directory contents.
-Defaults to the home directory if no path is specified.
-Example: {"path": "/home/pdp28"}
-"""
-    try:
-        output = subprocess.run(
-            f"ls -lA --group-directories-first '{path}'",
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        return output.stdout + output.stderr
-    except subprocess.TimeoutExpired:
-        return "Error: Command timed out"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
+    
 checkpointer = InMemorySaver()
-
-llm_with_tools = llm.bind_tools([shell_tool, list_directory])
+    
+llm_with_tools = llm.bind_tools([shell_tool])
 
 def llm_node(state : Tool_state) -> Tool_state:
     messages = state["messages"]
@@ -132,13 +70,7 @@ def llm_node(state : Tool_state) -> Tool_state:
             (
                 "system",
                 """### SYSTEM ROLE
-You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your 
-mission is to efficiently fulfill user requests by executing appropriate shell commands. Your primary working directory is `/home/pdp28`.
-
-### GREETING HANDLING
-- If the input starts with "GREETING:", respond warmly to the greeting and ask how you can help
-- Keep the response brief and friendly
-- Then wait for the user's actual task
+You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your mission is to efficiently fulfill user requests by executing appropriate shell commands. Your primary working directory is `/home/pdp28`.
 
 ### CORE PRINCIPLES
 1. **Proactive Path Resolution**:
@@ -183,193 +115,75 @@ User Request → Path Validation → Command Execution → Output Analysis → V
     # print(state)
     return {"messages" : state["messages"]}
 
-
-
 def if_tool_call(state : Tool_state) -> str:
     messages = state["messages"][-1]
 
     if messages.tool_calls:
-        return "approval"
+        return "tool_node"
     else:
         return "end"
 
 def tool_node(state : Tool_state) -> Tool_state:
-    """Extract tool calls and prepare them for approval"""
     messages = state["messages"][-1]
 
-    tool_by_name = {t.name : t for t in [shell_tool, list_directory]}
-    if messages.tool_calls:
-        # Store all pending tool calls for approval
-        pending_cmds = []
-        for tool_call in messages.tool_calls:
-            tool_name = tool_call["name"]
-            args = tool_call["args"]
-
-            if tool_name == "shell_tool":
-                commands = args.get("commands", [])
-                pending_cmds.extend(commands)
-            elif tool_name == "list_directory":
-                path = args.get("path", "/home/pdp28")
-                pending_cmds.append(f"list_directory(path='{path}')")
-
-        if pending_cmds:
-            state["pending_commands"] = pending_cmds
-            state["approval_status"] = "pending"
-            return {
-                "messages": state["messages"],
-                "pending_commands": pending_cmds,
-                "approval_status": "pending"
-            }
-
-    return {"messages": state["messages"]}
-
-def approval_node(state: Tool_state):
-    """Ask user to approve pending commands before execution"""
-    if not state.get("pending_commands"):
-        return {"approval_status": "no_pending"}
-
-    commands_str = "\n".join(f"  • {cmd}" for cmd in state["pending_commands"])
-
-    # Use interrupt to pause and wait for user input
-    decision = interrupt({
-        "question": "Do you approve executing these commands?",
-        "details": f"Pending commands:\n{commands_str}",
-    })
-
-    # Return the decision (will be resumed with the user's answer)
-    if decision:
-        return {"approval_status": "approved"}
-    else:
-        return {"approval_status": "rejected"}
-
-def execute_commands(state: Tool_state) -> Tool_state:
-    """Execute the approved tool calls"""
-    messages = state["messages"][-1]
-    tool_by_name = {t.name : t for t in [shell_tool, list_directory]}
-
+    tool_by_name = {t.name : t for t in [shell_tool]}
     if messages.tool_calls:
         for tool_call in messages.tool_calls:
+            # print(tool_by_name.get(tool_call["name"]))
+
             tool_name = tool_call["name"]
             response = tool_by_name.get(tool_name).invoke(tool_call["args"])
             state["messages"].append(ToolMessage(content=str(response), tool_call_id=tool_call["id"]))
-
-    return {
-        "messages": state["messages"],
-        "approval_status": "approved",
-        "pending_commands": None
-    }
-
-def should_execute(state: Tool_state) -> str:
-    """Decide whether to execute or cancel based on approval"""
-    if state.get("approval_status") == "approved":
-        return "execute_commands"
-    elif state.get("approval_status") == "rejected":
-        return "cancel_execution"
-    else:
-        return "llm_node"
-
-def cancel_execution(state: Tool_state) -> Tool_state:
-    """Cancel command execution"""
-    print("❌ Command execution cancelled by user")
-    return {
-        "approval_status": "rejected",
-        "pending_commands": None,
-        "messages": state["messages"]
-    }
-
-
+        return {"messages" : state["messages"]}
+    
 state_graph = StateGraph(Tool_state)
 
 state_graph.add_node("llm_node", llm_node)
 state_graph.add_node("tool_node", tool_node)
-state_graph.add_node("refactor_tool", refactor_tool)
-state_graph.add_node("approval", approval_node)
-state_graph.add_node("execute_commands", execute_commands)
-state_graph.add_node("cancel_execution", cancel_execution)
+state_graph.add_edge(START, "llm_node")
+state_graph.add_conditional_edges("llm_node", if_tool_call,{"tool_node":"tool_node", "end":END})
+state_graph.add_edge("tool_node", "llm_node")
 
-state_graph.add_edge(START, "refactor_tool")
-state_graph.add_edge("refactor_tool", "llm_node")
-state_graph.add_conditional_edges("llm_node", if_tool_call, {"approval": "tool_node", "end": END})
-state_graph.add_edge("tool_node", "approval")
-state_graph.add_conditional_edges("approval", should_execute, {
-    "execute_commands": "execute_commands",
-    "cancel_execution": "cancel_execution",
-    "llm_node": "llm_node"
-})
-state_graph.add_edge("execute_commands", "llm_node")
-state_graph.add_edge("cancel_execution", END)
-
-graph = state_graph.compile(
-    checkpointer=checkpointer,
-    interrupt_after=["approval"]  # Interrupt after approval node
-)
+graph = state_graph.compile(checkpointer=checkpointer)
 
 
 
 def main():
+
     running = True
     config = {"configurable": {"thread_id": "1"}}
+    messages = []
 
-    while running:
-        print("\n" + "="*60)
-        user_input = input("Enter your input | Enter 'no' to exit: ").strip()
-        if user_input.lower() == "no":
-            print("Bye!")
-            break
+    print("\n" + "="*60)
+    print("Enter you input | Enter no to exit : ", end="")
+    user_input = str(input())
+    if user_input.lower() == "no":
+        running = False
+        print("Bye!")
+        return
 
-        if not user_input:
-            continue
+    messages.append(HumanMessage(content=user_input))
 
-        # Initialize state with all required fields
-        initial_state = {
-            "messages": [HumanMessage(content=user_input)],
-            "pending_commands": None,
-            "approval_status": None
-        }
+    # res = graph.invoke({
+    #     "messages": messages
+    # }, config)
+    for chunk in graph.stream(
+    {
+        "messages": messages,
+    },
+    stream_mode=["updates"],
+    config=config
+):
+        print(chunk)
 
-        try:
-            # Invoke the graph with initial state
-            graph.invoke(initial_state, config)
+    # messages = res["messages"]
 
-            # Check for interrupts in a loop
-            while True:
-                state = graph.get_state(config)
-
-                # If there's no next node or we've finished, break
-                if not state.next:
-                    break
-
-                # Check if we're at the approval node with pending commands
-                if state.values.get("pending_commands"):
-                    print("\n⚠️  APPROVAL REQUIRED:")
-                    print("-"*60)
-                    for cmd in state.values["pending_commands"]:
-                        print(f"  • {cmd}")
-
-                    approval = input("\nApprove execution? (yes/no): ").strip().lower()
-                    decision = approval == "yes"
-
-                    # Resume the graph with updated approval status
-                    state.values["approval_status"] = "approved" if decision else "rejected"
-                    graph.invoke(state.values, config)
-                else:
-                    # No pending commands, continue execution
-                    graph.invoke(None, config)
-
-            # Get final state and display response
-            final_state = graph.get_state(config)
-            print("\n✅ Agent Response:")
-            print("-"*60)
-            for msg in reversed(final_state.values["messages"]):
-                if isinstance(msg, AIMessage) and msg.content and not msg.tool_calls:
-                    print(msg.content)
-                    break
-
-        except Exception as e:
-            import traceback
-            print(f"Error: {str(e)}")
-            traceback.print_exc()
-
-
+    # print("\n✅ Agent Response:")
+    # print("-"*60)
+    # for msg in res["messages"]:
+    #     if hasattr(msg, 'content') and msg.content:
+    #         print(msg.content)
+    
+    
 if __name__ == "__main__":
     main()
