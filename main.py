@@ -185,7 +185,7 @@ state_graph.add_conditional_edges("llm_node", if_tool_call,{"tool_node":"tool_no
 state_graph.add_edge("tool_node", "llm_node")
 
 graph = state_graph.compile(checkpointer=checkpointer)
-print(graph.get_graph().draw_mermaid())
+# print(graph.get_graph().draw_mermaid())
 
 
 console = Console()
