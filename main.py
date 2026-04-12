@@ -1,5 +1,7 @@
 from langchain_openrouter import ChatOpenRouter
-from typing import List, TypedDict
+from langchain_groq import ChatGroq
+from typing import List, TypedDict, Literal
+from langgraph.types import interrupt, Command
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.tools import tool
@@ -9,18 +11,23 @@ from langchain_community.tools import ShellTool
 from IPython.display import Image
 import subprocess
 from typing import List
-from langgraph.checkpoint.memory import InMemorySaver  
+from langgraph.checkpoint.memory import InMemorySaver
+from rich.console import Console
+from langchain_community.tools import DuckDuckGoSearchRun
 load_dotenv()
 
 class Tool_state(TypedDict):
     messages : List
+    allow_all : bool
 
-
-llm = ChatOpenRouter(
-    model="stepfun/step-3.5-flash:free",
+llm = ChatGroq(
+    model="openai/gpt-oss-120b",
     temperature=0,
     max_retries=3
 )
+
+duckduckgo_search = DuckDuckGoSearchRun()
+
 
 @tool
 def shell_tool(commands: List[str]) -> str:
@@ -42,23 +49,20 @@ Example : {"commands": ["echo 'Hello World!'"]}
                 timeout=30
             )
             results.append(output.stdout + output.stderr)
-
         except subprocess.TimeoutExpired:
             results.append("Error: Command timed out after 30 seconds")
         except Exception as e:
             results.append(f"Error: {str(e)}")
-    # print(results)
     return "\n".join(results)
     
 checkpointer = InMemorySaver()
     
-llm_with_tools = llm.bind_tools([shell_tool])
+llm_with_tools = llm.bind_tools([shell_tool, duckduckgo_search])
 
 def llm_node(state : Tool_state) -> Tool_state:
     messages = state["messages"]
+    allow = state.get("allow", False)
 
-    # Keep only the last N messages to avoid token limits
-    # Keep the initial user message + last 10 messages to maintain context
     if len(messages) > 11:
         messages = [messages[0]] + messages[-10:]
 
@@ -67,11 +71,10 @@ def llm_node(state : Tool_state) -> Tool_state:
     prompt = ChatPromptTemplate.from_messages(
         [
             (
-                "system",n
+                "system",
                 """### SYSTEM ROLE
-You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your mission is to efficiently fulfill user requests by executing appropriate shell commands. Your primary working directory is `/home/pdp28`.
+You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your mission is to efficiently fulfill user requests by executing appropriate shell commands or what the user asked for. Your primary working directory is `/home/pdp28`.
 
-### CORE PRINCIPLES
 1. **Proactive Path Resolution**:
    - When users mention paths or files that may not exist, automatically search for them using intelligent discovery.
    - Use `find . -iname "*keyword*" -type f 2>/dev/null | head -20` to locate resources.
@@ -100,7 +103,6 @@ You are an expert Linux Automation Agent with intelligent self-correction capabi
    - Missing dependencies: Install them or suggest alternatives.
    - Environment errors: Verify PATH, environment variables, and active virtual environments.
 
-### EXECUTION STRATEGY
 User Request → Path Validation → Command Execution → Output Analysis → Verification → (Errors? Self-Correct Loop) → Final Clean Summary"""
             ),
             ("placeholder", "{input}")
@@ -109,10 +111,9 @@ User Request → Path Validation → Command Execution → Output Analysis → V
 
     chain = prompt | llm_with_tools
     response = chain.invoke({"input":messages})
-    # print(response)
+    print(response)
     state["messages"].append(AIMessage(content=response.content, tool_calls=response.tool_calls, invalid_tool_calls=response.invalid_tool_calls ))
-    # print(state)
-    return {"messages" : state["messages"]}
+    return {"messages" : state["messages"], "allow": allow}
 
 def if_tool_call(state : Tool_state) -> str:
     messages = state["messages"][-1]
@@ -122,30 +123,72 @@ def if_tool_call(state : Tool_state) -> str:
     else:
         return "end"
 
+def refactor_node(state : Tool_state):
+    human_msg = state["messages"][-1]
+    
+    print(human_msg)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", """Rewrite the user's input into one short execution prompt for the next model.
+
+If conversational, return a brief friendly reply instruction.
+If technical, return a direct action prompt that tells the next model exactly what to do.
+Use concrete shell/GitHub steps when relevant.
+Return only the rewritten instruction text."""),
+            ("human", "{input}")
+
+        ]
+    )
+    chain = prompt | llm
+    res = HumanMessage(content=chain.invoke({"input":human_msg.content}).content)
+    return { "messages" : [res]}
+
 def tool_node(state : Tool_state) -> Tool_state:
     messages = state["messages"][-1]
+    allow_all = state.get("allow_all", False)
 
-    tool_by_name = {t.name : t for t in [shell_tool]}
+    tool_by_name = {t.name : t for t in [shell_tool, duckduckgo_search]}
     if messages.tool_calls:
         for tool_call in messages.tool_calls:
-            # print(tool_by_name.get(tool_call["name"]))
 
             tool_name = tool_call["name"]
+            if tool_name == "shell_tool" and not allow_all:
+                cmd_list = tool_call["args"].get("commands", [])
+                cmd_preview = cmd_list[0] if cmd_list else "the requested command(s)"
+                approval = interrupt({
+                    "question": "Are you okay to run, type 'allow all' to allow all the commands or type 'yes' to allow single command" ,
+                    "query": cmd_preview,
+                })
+                if str(approval).strip().lower() not in {"y", "yes", "allow all", "allow", "allow al"}:
+                    state["messages"].append(
+                        ToolMessage(content=f"Skipped by user: {cmd_preview}", tool_call_id=tool_call["id"])
+                    )
+                    continue
+
+                
+                if str(approval).strip().lower() in {"allow all", "allow", "allow al"}:
+                    allow_all = True
+                print(f"\n⏳Executing {cmd_preview}")
             response = tool_by_name.get(tool_name).invoke(tool_call["args"])
             state["messages"].append(ToolMessage(content=str(response), tool_call_id=tool_call["id"]))
-        return {"messages" : state["messages"]}
+        return {"messages" : state["messages"], "allow_all" : allow_all}
     
 state_graph = StateGraph(Tool_state)
 
 state_graph.add_node("llm_node", llm_node)
 state_graph.add_node("tool_node", tool_node)
-state_graph.add_edge(START, "llm_node")
+state_graph.add_node("refactor_node", refactor_node)
+
+state_graph.add_edge(START, "refactor_node")
+state_graph.add_edge("refactor_node", "llm_node")
 state_graph.add_conditional_edges("llm_node", if_tool_call,{"tool_node":"tool_node", "end":END})
 state_graph.add_edge("tool_node", "llm_node")
 
 graph = state_graph.compile(checkpointer=checkpointer)
+print(graph.get_graph().draw_mermaid())
 
 
+console = Console()
 
 def main():
 
@@ -163,25 +206,39 @@ def main():
 
     messages.append(HumanMessage(content=user_input))
 
-    # res = graph.invoke({
-    #     "messages": messages
-    # }, config)
-    for chunk in graph.stream(
-    {
+    res = graph.invoke({
         "messages": messages,
-    },
-    stream_mode=["updates"],
-    config=config
-):
-        print(chunk)
+         "allow":False
+    }, config)
+    
+    while True:
+        snapshot = graph.get_state(config)
+        if snapshot.tasks and snapshot.tasks[0].interrupts:
+            interrupt_value = snapshot.tasks[0].interrupts[0].value
+            print(interrupt_value["question"] ,  console.print(interrupt_value["query"], style="bold red")  ,"(y/n) : ", end="")
+            input_human = input()
 
-    # messages = res["messages"]
+            res = graph.invoke(Command(resume=input_human), config=config)
+            if input_human.lower() == "n":
+                print("Rejected by user")
+                return
+            for msg in res["messages"]:
+                if hasattr(msg, 'content') and msg.content:
+                    print(msg.content)
+        else :
+            print("="*100)
+            print("\n✅ Agent Response:")
+            print(res["messages"][-1].content)
+            print("Work done !")
+            return
 
-    # print("\n✅ Agent Response:")
-    # print("-"*60)
-    # for msg in res["messages"]:
-    #     if hasattr(msg, 'content') and msg.content:
-    #         print(msg.content)
+    else:
+        print("\nNo interrupt data found.")
+
+    return
+
+   
+    
     
     
 if __name__ == "__main__":
