@@ -12,11 +12,12 @@ from IPython.display import Image
 import subprocess
 from typing import List
 from langgraph.checkpoint.memory import InMemorySaver
+from rich.console import Console
 load_dotenv()
 
 class Tool_state(TypedDict):
     messages : List
-    allow : bool
+    allow_all : bool
 
 llm = ChatGroq(
     model="openai/gpt-oss-120b",
@@ -24,9 +25,6 @@ llm = ChatGroq(
     max_retries=3
 )
 
-# def human_in_loop(state : StateGraph):
-    
-# def get_allow_state(config : )
 
 @tool
 def shell_tool(commands: List[str]) -> str:
@@ -52,7 +50,6 @@ Example : {"commands": ["echo 'Hello World!'"]}
             results.append("Error: Command timed out after 30 seconds")
         except Exception as e:
             results.append(f"Error: {str(e)}")
-    # print(results)
     return "\n".join(results)
     
 checkpointer = InMemorySaver()
@@ -63,8 +60,6 @@ def llm_node(state : Tool_state) -> Tool_state:
     messages = state["messages"]
     allow = state.get("allow", False)
 
-    # Keep only the last N messages to avoid token limits
-    # Keep the initial user message + last 10 messages to maintain context
     if len(messages) > 11:
         messages = [messages[0]] + messages[-10:]
 
@@ -75,9 +70,8 @@ def llm_node(state : Tool_state) -> Tool_state:
             (
                 "system",
                 """### SYSTEM ROLE
-You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your mission is to efficiently fulfill user requests by executing appropriate shell commands. Your primary working directory is `/home/pdp28`.
+You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your mission is to efficiently fulfill user requests by executing appropriate shell commands or what the user asked for. Your primary working directory is `/home/pdp28`.
 
-### CORE PRINCIPLES
 1. **Proactive Path Resolution**:
    - When users mention paths or files that may not exist, automatically search for them using intelligent discovery.
    - Use `find . -iname "*keyword*" -type f 2>/dev/null | head -20` to locate resources.
@@ -106,7 +100,6 @@ You are an expert Linux Automation Agent with intelligent self-correction capabi
    - Missing dependencies: Install them or suggest alternatives.
    - Environment errors: Verify PATH, environment variables, and active virtual environments.
 
-### EXECUTION STRATEGY
 User Request → Path Validation → Command Execution → Output Analysis → Verification → (Errors? Self-Correct Loop) → Final Clean Summary"""
             ),
             ("placeholder", "{input}")
@@ -115,9 +108,7 @@ User Request → Path Validation → Command Execution → Output Analysis → V
 
     chain = prompt | llm_with_tools
     response = chain.invoke({"input":messages})
-    # print(response)
     state["messages"].append(AIMessage(content=response.content, tool_calls=response.tool_calls, invalid_tool_calls=response.invalid_tool_calls ))
-    # print(state)
     return {"messages" : state["messages"], "allow": allow}
 
 def if_tool_call(state : Tool_state) -> str:
@@ -128,48 +119,70 @@ def if_tool_call(state : Tool_state) -> str:
     else:
         return "end"
 
+def refactor_node(state : Tool_state):
+    human_msg = state["messages"][-1]
+    
+    print(human_msg)
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", """Rewrite the user's input into one short execution prompt for the next model.
+
+If conversational, return a brief friendly reply instruction.
+If technical, return a direct action prompt that tells the next model exactly what to do.
+Use concrete shell/GitHub steps when relevant.
+Return only the rewritten instruction text."""),
+            ("human", "{input}")
+
+        ]
+    )
+    chain = prompt | llm
+    res = HumanMessage(content=chain.invoke({"input":human_msg.content}).content)
+    return { "messages" : [res]}
+
 def tool_node(state : Tool_state) -> Tool_state:
     messages = state["messages"][-1]
-    allow = state.get("allow", False)
+    allow_all = state.get("allow_all", False)
 
     tool_by_name = {t.name : t for t in [shell_tool]}
     if messages.tool_calls:
         for tool_call in messages.tool_calls:
-            # print(tool_by_name.get(tool_call["name"]))
 
             tool_name = tool_call["name"]
-
-            if tool_name == "shell_tool" and not allow:
+            if tool_name == "shell_tool" and not allow_all:
                 cmd_list = tool_call["args"].get("commands", [])
                 cmd_preview = cmd_list[0] if cmd_list else "the requested command(s)"
                 approval = interrupt({
-                    "question": "Are you okay to run ",
+                    "question": "Are you okay to run, type 'allow all' to allow all the commands or type 'yes' to allow single command" ,
                     "query": cmd_preview,
                 })
-
-                if str(approval).strip().lower() not in {"y", "yes"}:
+                if str(approval).strip().lower() not in {"y", "yes", "allow all", "allow", "allow al"}:
                     state["messages"].append(
                         ToolMessage(content=f"Skipped by user: {cmd_preview}", tool_call_id=tool_call["id"])
                     )
                     continue
 
-                allow = True
-
+                
+                if str(approval).strip().lower() in {"allow all", "allow", "allow al"}:
+                    allow_all = True
+                print(f"\n⏳Executing {cmd_preview}")
             response = tool_by_name.get(tool_name).invoke(tool_call["args"])
             state["messages"].append(ToolMessage(content=str(response), tool_call_id=tool_call["id"]))
-        return {"messages" : state["messages"], "allow" : allow}
+        return {"messages" : state["messages"], "allow_all" : allow_all}
     
 state_graph = StateGraph(Tool_state)
 
 state_graph.add_node("llm_node", llm_node)
 state_graph.add_node("tool_node", tool_node)
-state_graph.add_edge(START, "llm_node")
+state_graph.add_node("refactor_node", refactor_node)
+
+state_graph.add_edge(START, "refactor_node")
+state_graph.add_edge("refactor_node", "llm_node")
 state_graph.add_conditional_edges("llm_node", if_tool_call,{"tool_node":"tool_node", "end":END})
 state_graph.add_edge("tool_node", "llm_node")
 
 graph = state_graph.compile(checkpointer=checkpointer)
 
-
+console = Console()
 
 def main():
 
@@ -194,17 +207,12 @@ def main():
     
     while True:
         snapshot = graph.get_state(config)
-        # print(snapshot)
         if snapshot.tasks and snapshot.tasks[0].interrupts:
             interrupt_value = snapshot.tasks[0].interrupts[0].value
-            # print("\n⏸️ Interrupt data:")
-            # print(interrupt_value)
-            print(interrupt_value["question"] + interrupt_value["query"]  + "(y/n) : ", end="")
+            print(interrupt_value["question"] ,  console.print(interrupt_value["query"], style="bold red")  ,"(y/n) : ", end="")
             input_human = input()
 
             res = graph.invoke(Command(resume=input_human), config=config)
-            # print(f"{interrupt_value["query"]}")
-            # print(res)
             if input_human.lower() == "n":
                 print("Rejected by user")
                 return
@@ -213,6 +221,8 @@ def main():
                     print(msg.content)
         else :
             print("="*100)
+            print("\n✅ Agent Response:")
+            print(res["messages"][-1].content)
             print("Work done !")
             return
 
@@ -220,10 +230,8 @@ def main():
         print("\nNo interrupt data found.")
 
     return
-    # messages = res["messages"]
 
-    # print("\n✅ Agent Response:")
-    # print("-"*60)
+   
     
     
     
