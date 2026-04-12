@@ -13,6 +13,7 @@ import subprocess
 from typing import List
 from langgraph.checkpoint.memory import InMemorySaver
 from rich.console import Console
+from langchain_community.tools import DuckDuckGoSearchRun
 load_dotenv()
 
 class Tool_state(TypedDict):
@@ -24,6 +25,8 @@ llm = ChatGroq(
     temperature=0,
     max_retries=3
 )
+
+duckduckgo_search = DuckDuckGoSearchRun()
 
 
 @tool
@@ -54,7 +57,7 @@ Example : {"commands": ["echo 'Hello World!'"]}
     
 checkpointer = InMemorySaver()
     
-llm_with_tools = llm.bind_tools([shell_tool])
+llm_with_tools = llm.bind_tools([shell_tool, duckduckgo_search])
 
 def llm_node(state : Tool_state) -> Tool_state:
     messages = state["messages"]
@@ -108,6 +111,7 @@ User Request → Path Validation → Command Execution → Output Analysis → V
 
     chain = prompt | llm_with_tools
     response = chain.invoke({"input":messages})
+    print(response)
     state["messages"].append(AIMessage(content=response.content, tool_calls=response.tool_calls, invalid_tool_calls=response.invalid_tool_calls ))
     return {"messages" : state["messages"], "allow": allow}
 
@@ -143,7 +147,7 @@ def tool_node(state : Tool_state) -> Tool_state:
     messages = state["messages"][-1]
     allow_all = state.get("allow_all", False)
 
-    tool_by_name = {t.name : t for t in [shell_tool]}
+    tool_by_name = {t.name : t for t in [shell_tool, duckduckgo_search]}
     if messages.tool_calls:
         for tool_call in messages.tool_calls:
 
@@ -181,6 +185,8 @@ state_graph.add_conditional_edges("llm_node", if_tool_call,{"tool_node":"tool_no
 state_graph.add_edge("tool_node", "llm_node")
 
 graph = state_graph.compile(checkpointer=checkpointer)
+print(graph.get_graph().draw_mermaid())
+
 
 console = Console()
 
