@@ -30,6 +30,19 @@ duckduckgo_search = DuckDuckGoSearchRun()
 
 
 @tool
+def human_in_loop(question : str):
+    """This helps when llm to ask some recommandations to the human and then execute or when you need to wait for user next step
+    Example : 
+    "question":"What i need to do next"
+    """
+    print("Question ", question)
+    reply = interrupt({
+        "question" : question
+    })
+    
+    return reply
+
+@tool
 def shell_tool(commands: List[str]) -> str:
     """Use this tool to execute shell commands on the local machine.
 Only run safe and necessary commands.
@@ -57,7 +70,7 @@ Example : {"commands": ["echo 'Hello World!'"]}
     
 checkpointer = InMemorySaver()
     
-llm_with_tools = llm.bind_tools([shell_tool, duckduckgo_search])
+llm_with_tools = llm.bind_tools([shell_tool, duckduckgo_search, human_in_loop])
 
 def llm_node(state : Tool_state) -> Tool_state:
     messages = state["messages"]
@@ -74,6 +87,9 @@ def llm_node(state : Tool_state) -> Tool_state:
                 "system",
                 """### SYSTEM ROLE
 You are an expert Linux Automation Agent with intelligent self-correction capabilities. Your mission is to efficiently fulfill user requests by executing appropriate shell commands or what the user asked for. Your primary working directory is `/home/pdp28`.
+You can also use human_in_loop tool to interrupt and ask questions to the user when needed.
+
+CRITICAL: When you need to wait for the user's next step or need user input, you MUST call the human_in_loop tool. This is how you pause and wait for the user.
 
 1. **Proactive Path Resolution**:
    - When users mention paths or files that may not exist, automatically search for them using intelligent discovery.
@@ -96,6 +112,7 @@ You are an expert Linux Automation Agent with intelligent self-correction capabi
    - Clearly explain any `sudo` requirements and security implications.
    - Provide concise, structured output summaries with no unnecessary verbose logs.
    - Do not include `tool_calls` in the final response when the task is complete.
+   - When user told you to wait or you have some doubt about next step, CALL the human_in_loop tool with your question. The user will answer and you can proceed with further steps.
 
 5. **Error Handling**:
    - Timeout errors: Increase timeout or reduce command scope.
@@ -147,7 +164,7 @@ def tool_node(state : Tool_state) -> Tool_state:
     messages = state["messages"][-1]
     allow_all = state.get("allow_all", False)
 
-    tool_by_name = {t.name : t for t in [shell_tool, duckduckgo_search]}
+    tool_by_name = {t.name : t for t in [shell_tool, duckduckgo_search, human_in_loop]}
     if messages.tool_calls:
         for tool_call in messages.tool_calls:
 
@@ -194,52 +211,45 @@ def main():
 
     running = True
     config = {"configurable": {"thread_id": "1"}}
-    messages = []
 
-    print("\n" + "="*60)
-    print("Enter you input | Enter no to exit : ", end="")
-    user_input = str(input())
-    if user_input.lower() == "no":
-        running = False
-        print("Bye!")
-        return
+    while running:
+        messages = []
 
-    messages.append(HumanMessage(content=user_input))
-
-    res = graph.invoke({
-        "messages": messages,
-         "allow":False
-    }, config)
-    
-    while True:
-        snapshot = graph.get_state(config)
-        if snapshot.tasks and snapshot.tasks[0].interrupts:
-            interrupt_value = snapshot.tasks[0].interrupts[0].value
-            print(interrupt_value["question"] ,  console.print(interrupt_value["query"], style="bold red")  ,"(y/n) : ", end="")
-            input_human = input()
-
-            res = graph.invoke(Command(resume=input_human), config=config)
-            if input_human.lower() == "n":
-                print("Rejected by user")
-                return
-            for msg in res["messages"]:
-                if hasattr(msg, 'content') and msg.content:
-                    print(msg.content)
-        else :
-            print("="*100)
-            print("\n✅ Agent Response:")
-            print(res["messages"][-1].content)
-            print("Work done !")
+        print("\n" + "="*60)
+        print("Enter you input | Enter no to exit : ", end="")
+        user_input = str(input())
+        if user_input.lower() == "no":
+            running = False
+            print("Bye!")
             return
 
-    else:
-        print("\nNo interrupt data found.")
+        messages.append(HumanMessage(content=user_input))
 
-    return
+        res = graph.invoke({
+            "messages": messages,
+            "allow":False
+        }, config)
+        
+        while True:
+            snapshot = graph.get_state(config)
+            if snapshot.tasks and snapshot.tasks[0].interrupts:
+                interrupt_value = snapshot.tasks[0].interrupts[0].value
+                print(console.print(interrupt_value.get("question",""), style="bold green") ,  console.print(interrupt_value.get("query", ""), style="bold red")  ,"(y/n) : ", end="")
+                input_human = input()
 
-   
-    
-    
+                res = graph.invoke(Command(resume=input_human), config=config)
+                if input_human.lower() == "n":
+                    print("Rejected by user")
+                    break
+                for msg in res["messages"]:
+                    if hasattr(msg, 'content') and msg.content:
+                        print(msg.content)
+            else :
+                print("="*100)
+                print("\n✅ Agent Response:")
+                print(res["messages"][-1].content)
+                print("Work done !")
+                break   
     
 if __name__ == "__main__":
     main()
