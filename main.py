@@ -31,7 +31,7 @@ duckduckgo_search = DuckDuckGoSearchRun()
 
 @tool
 def human_in_loop(question : str):
-    """This helps when llm to ask some recommandations to the human and then execute or when you need to wait for user next step
+    """This helps when llm to ask some recommandations to the human and then execute or when you need to wait for users next step
     Example : 
     "question":"What i need to do next"
     """
